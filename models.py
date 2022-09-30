@@ -49,19 +49,18 @@ def MLPConvolution(n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_den
       dense_results = tf.keras.layers.Dense(kwargs.get('n_colors') * n_temporal_basis * 2, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant())(dense_results);
   return tf.keras.Model(inputs = inputs, outputs = dense_results);
 
-class BetaForward(tf.keras.layers.Layer):
+class Beta(tf.keras.layers.Layer):
   def __init__(self, trajectory_length = 1000, n_basis = 10, step1_beta = 1e-3, **kwargs):
     self.trajectory_length = 1000;
     self.n_basis = 10;
     self.step1_beta = 1e-3;
-    super(BetaForward, self).__init__(**kwargs);
+    super(Beta, self).__init__(**kwargs);
   def build(self, input_shape):
     self.beta_perturb_coefficients = self.add_weight(shape = (self.n_basis,1), dtype = tf.float32, initializer = tf.keras.initializers.Constant(), trainable = True);
     self.temporal_basis = self.add_weight(shape = (self.n_basis, self.trajectory_length), dtype = tf.float32, trainable = False);
     self.temporal_basis.assign(self.generate_temporal_basis());
   def generate_temporal_basis(self,):
-    # sample n_basis evenly scattered numbers between [-1,1]
-    # every basis is a vector having a single peak at the corresponding sampled number
+    # sample n_basis soft one-hot basises
     temporal_basis = tf.zeros((self.trajectory_length, self.n_basis));
     xx = tf.linspace(-1, 1, self.trajectory_length); # xx.shape = (trajectory_length,)
     x_centers = tf.linspace(-1, 1, self.n_basis); # x_centers.shape = (n_basis,)
@@ -70,17 +69,19 @@ class BetaForward(tf.keras.layers.Layer):
     temporal_basis /= tf.math.reduce_sum(temporal_basis, axis = 1, keepdims = True); # temporal_basis.shape = (trajectory_length, n_basis)
     return tf.cast(tf.transpose(temporal_basis), dtype = tf.float32); # shape = (n_basis, trajectory_length)
   def call(self, inputs):
-    # 1) get beta vector for diffusion
+    # 1) calculate a array of beta as candidates
     # beta_perturb = weighted sum of temporal_basis
     beta_perturb = tf.squeeze(tf.linalg.matmul(self.temporal_basis, self.beta_perturb_coefficients, transpose_a = True), axis = -1); # beta_perturb.shape = (trajectory_length,)
-    # beta_baseline = [1/1000,...,1/2]
-    beta_baseline = 1 / tf.linspace(self.trajectory_length, 2, self.trajectory_length); # beta_baseline.shape = (trajectory_length,)
-    beta_baseline_offset = tf.math.log(beta_baseline / (1 - beta_baseline)); # beta_baseline.shape = (trajectory_length,)
-    beta = tf.math.sigmoid(beta_perturb + tf.cast(beta_baseline_offset, dtype = tf.float32)); # beta.shape = (trajectory_length,)
+    # NOTE: beta = beta_baseline = [1/1000,...,1/2] if beta_perturb = 0, because sigmoid(log(x/(1-x))) = x
+    # beta_perturb is a learnable perturbation to beta steps
+    beta_baseline = 1. / tf.linspace(self.trajectory_length, 2, self.trajectory_length); # beta_baseline.shape = (trajectory_length,)
+    beta_baseline = tf.math.log(beta_baseline / (1 - beta_baseline)); # beta_baseline.shape = (trajectory_length,)
+    beta = tf.math.sigmoid(beta_perturb + tf.cast(beta_baseline, dtype = tf.float32)); # beta.shape = (trajectory_length,)
     min_beta = tf.concat([tf.ones((1,)) * (1e-6 + self.step1_beta),tf.ones((self.trajectory_length - 1,)) * 1e-6], axis = 0); # min_beta.shape = (trajectory_length,)
     beta = min_beta + beta * (1. - min_beta - 1e-5); # beta.shape = (trajectory_length,)
-    # 2) get beta weight vector
-    t_weight = tf.math.maximum(1. - (tf.expand_dims(inputs, axis = -1) - tf.tile(tf.expand_dims(tf.range(self.trajectory_length, dtype = tf.float32), axis = 0), (tf.shape(inputs)[0], 1))), 0); # diff.shape = (batch, trajectory_length,)
+    # 2) pick beta from beta array with the input indices
+    # NOTE: inputs are indices in range [0, trajectory_length - 1], they soft pick values from beta array as betas
+    t_weight = tf.math.maximum(1. - tf.math.abs(tf.expand_dims(inputs, axis = -1) - tf.tile(tf.expand_dims(tf.range(self.trajectory_length, dtype = tf.float32), axis = 0), (tf.shape(inputs)[0], 1))), 0); # diff.shape = (batch, trajectory_length,)
     return tf.squeeze(tf.linalg.matmul(t_weight, tf.expand_dims(beta, axis = -1)), axis = -1); # shape = (batch,)
   def get_config(self):
     config = super(Beta, self).get_config();
@@ -92,9 +93,9 @@ class BetaForward(tf.keras.layers.Layer):
     return cls(**config);
 
 if __name__ == "__main__":
-  beta_forward = BetaForward();
+  beta_forward = Beta();
   b = beta_forward(tf.random.normal(shape = (4,), dtype = tf.float32));
-  print(b.shape)
+  print(b)
   inputs = np.random.normal(size = (10, 64, 64, 3));
   model = MLPConvolution(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   outputs = model(inputs);
