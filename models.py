@@ -46,15 +46,38 @@ def MLPConvolution(n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_den
     if i != n_layers_dense_upper - 1:
       dense_results = tf.keras.layers.Dense(n_hidden_dense_upper, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant(), activation = tf.keras.layers.LeakyReLU())(dense_results);
     else:
-      dense_results = tf.keras.layers.Dense(kwargs.get('n_colors') * n_temporal_basis * 2, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant())(dense_results);
+      dense_results = tf.keras.layers.Dense(kwargs.get('n_colors') * 2 * n_temporal_basis, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant())(dense_results);
+  # NOTE: dense_results.shape = (batch, height, width, n_colors * 2 * n_temporal_basis)
   return tf.keras.Model(inputs = inputs, outputs = dense_results);
 
-class Beta(tf.keras.layers.Layer):
+def Decoder(trajectory_length = 1000, **kwargs):
+  inputs = tf.keras.Input((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'))); # inputs.shape = (batch, height, width, n_colors)
+  beta = tf.keras.Input((trajectory_length,)); # beta.shape = (batch, trajectory_length)
+  results = MLPConvolution(**kwargs)(inputs); # results.shape = (batch, height, width, n_color * 2 * n_temporal_basis)
+  results = tf.keras.layers.Reshape((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'), 2, kwargs.get('n_temporal_basis')))(results);
+  def generate_temporal_basis(trajectory_length, n_basis):
+    # sample n_basis soft one-hot basises
+    temporal_basis = tf.zeros((trajectory_length, n_basis));
+    xx = tf.linspace(-1, 1, trajectory_length); # xx.shape = (trajectory_length,)
+    x_centers = tf.linspace(-1, 1, n_basis); # x_centers.shape = (n_basis,)
+    width = (x_centers[1] - x_centers[0]) / 2;
+    temporal_basis = tf.stack([tf.math.exp(-(xx - x_centers[ii])**2 / (2 * width**2)) for ii in range(n_basis)], axis = 1); # temporal_basis.shape = (trajectory_length, n_basis)
+    temporal_basis /= tf.math.reduce_sum(temporal_basis, axis = 1, keepdims = True); # temporal_basis.shape = (trajectory_length, n_basis)
+    return tf.cast(tf.transpose(temporal_basis), dtype = tf.float32); # shape = (n_basis, trajectory_length)
+  temporal_basis = tf.keras.layers.Lambda(lambda x, t, b: generate_temporal_basis(t, b), arguments = {'t': trajectory_length, 'b': kwargs.get('n_temporal_basis')})(inputs); # temporal_basis.shape = (n_basis, trajectory_length)
+  results = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([results, temporal_basis]); # results.shape = (batch, height, width, n_color, 2, trajectory_length)
+  mu_coeff = tf.keras.layers.Lambda(lambda x: x[...,0,:])(results); # mu.shape = (batch, height, width, n_colors, trajectory_length)
+  beta_coeff = tf.keras.layers.Lambda(lambda x: x[...,1,:])(results); # beta.shape = (batch, height, width, n_colors, trajectory_length)
+  beta_reverse = tf.keras.layers.Lambda(lambda x, t: tf.math.sigmoid(x[0] / tf.math.sqrt(t) + tf.reshape(tf.math.log(x[1] / (1 - x[1])), (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([beta_coeff, beta]); # beta_reverse.shape = (batch, height, width, n_colors, trajectory_length)
+  mu = tf.keras.layers.Lambda(lambda x, t: x[0] * tf.math.sqrt(1 - tf.reshape(x[1], (-1, 1, 1, 1, t))) + x[2] * tf.math.sqrt(tf.reshape(x[1], (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([inputs, beta, mu_coeff]);
+  return tf.keras.Model(inputs = inputs, outputs = (mu, beta_reverse));
+
+class BetaForward(tf.keras.layers.Layer):
   def __init__(self, trajectory_length = 1000, n_basis = 10, step1_beta = 1e-3, **kwargs):
     self.trajectory_length = 1000;
     self.n_basis = 10;
     self.step1_beta = 1e-3;
-    super(Beta, self).__init__(**kwargs);
+    super(BetaForward, self).__init__(**kwargs);
   def build(self, input_shape):
     self.beta_perturb_coefficients = self.add_weight(shape = (self.n_basis,1), dtype = tf.float32, initializer = tf.keras.initializers.Constant(), trainable = True);
     self.temporal_basis = self.add_weight(shape = (self.n_basis, self.trajectory_length), dtype = tf.float32, trainable = False);
@@ -79,10 +102,7 @@ class Beta(tf.keras.layers.Layer):
     beta = tf.math.sigmoid(beta_perturb + tf.cast(beta_baseline, dtype = tf.float32)); # beta.shape = (trajectory_length,)
     min_beta = tf.concat([tf.ones((1,)) * (1e-6 + self.step1_beta),tf.ones((self.trajectory_length - 1,)) * 1e-6], axis = 0); # min_beta.shape = (trajectory_length,)
     beta = min_beta + beta * (1. - min_beta - 1e-5); # beta.shape = (trajectory_length,)
-    # 2) pick beta from beta array with the input indices
-    # NOTE: inputs are indices in range [0, trajectory_length - 1], they soft pick values from beta array as betas
-    t_weight = tf.math.maximum(1. - tf.math.abs(tf.expand_dims(inputs, axis = -1) - tf.tile(tf.expand_dims(tf.range(self.trajectory_length, dtype = tf.float32), axis = 0), (tf.shape(inputs)[0], 1))), 0); # diff.shape = (batch, trajectory_length,)
-    return tf.squeeze(tf.linalg.matmul(t_weight, tf.expand_dims(beta, axis = -1)), axis = -1); # shape = (batch,)
+    return beta;
   def get_config(self):
     config = super(Beta, self).get_config();
     config['trajectory_length'] = self.trajectory_length;
@@ -93,9 +113,15 @@ class Beta(tf.keras.layers.Layer):
     return cls(**config);
 
 if __name__ == "__main__":
-  beta_forward = Beta();
-  b = beta_forward(tf.random.normal(shape = (4,), dtype = tf.float32));
-  print(b)
+  decoder = Decoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
+  inputs = np.random.normal(size = (10, 64, 64, 3));
+  mu, beta = decoder(inputs);
+  print(mu.shape, beta.shape);
+  decoder.save('decoder.h5');
+  beta_forward = BetaForward();
+  beta = beta_forward([]);
+  print(beta.shape);
+  exit()
   inputs = np.random.normal(size = (10, 64, 64, 3));
   model = MLPConvolution(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   outputs = model(inputs);
