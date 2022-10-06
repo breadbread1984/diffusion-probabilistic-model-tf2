@@ -64,13 +64,19 @@ def Decoder(trajectory_length = 1000, **kwargs):
     temporal_basis = tf.stack([tf.math.exp(-(xx - x_centers[ii])**2 / (2 * width**2)) for ii in range(n_basis)], axis = 1); # temporal_basis.shape = (trajectory_length, n_basis)
     temporal_basis /= tf.math.reduce_sum(temporal_basis, axis = 1, keepdims = True); # temporal_basis.shape = (trajectory_length, n_basis)
     return tf.cast(tf.transpose(temporal_basis), dtype = tf.float32); # shape = (n_basis, trajectory_length)
+  # outputs{batch, height, width, n_colors, 2, n_basis} * temporal_basis{n_basis, trajectory_length} = results.shape{batch, height, width, n_colors, 2, trajectory_length}
   temporal_basis = tf.keras.layers.Lambda(lambda x, t, b: generate_temporal_basis(t, b), arguments = {'t': trajectory_length, 'b': kwargs.get('n_temporal_basis')})(inputs); # temporal_basis.shape = (n_basis, trajectory_length)
   results = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([results, temporal_basis]); # results.shape = (batch, height, width, n_color, 2, trajectory_length)
   mu_coeff = tf.keras.layers.Lambda(lambda x: x[...,0,:])(results); # mu.shape = (batch, height, width, n_colors, trajectory_length)
   beta_coeff = tf.keras.layers.Lambda(lambda x: x[...,1,:])(results); # beta.shape = (batch, height, width, n_colors, trajectory_length)
-  beta_reverse = tf.keras.layers.Lambda(lambda x, t: tf.math.sigmoid(x[0] / tf.math.sqrt(t) + tf.reshape(tf.math.log(x[1] / (1 - x[1])), (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([beta_coeff, beta]); # beta_reverse.shape = (batch, height, width, n_colors, trajectory_length)
-  mu = tf.keras.layers.Lambda(lambda x, t: x[0] * tf.math.sqrt(1 - tf.reshape(x[1], (-1, 1, 1, 1, t))) + x[2] * tf.math.sqrt(tf.reshape(x[1], (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([inputs, beta, mu_coeff]);
-  return tf.keras.Model(inputs = inputs, outputs = (mu, beta_reverse));
+  # beta and mean for reverse(decoder) are perturbation of beta and mean for forward(encoder) process
+  # beta_reverse = sigmoid(beta_coeff + log(beta / (1 - beta)))
+  # mean = x * sqrt(1 - beta) + mu_coeff * sqrt(beta)
+  # std = sqrt(beta_reverse)
+  beta_reverse = tf.keras.layers.Lambda(lambda x, t: tf.math.sigmoid(x[0] / tf.math.sqrt(tf.cast(t, dtype = tf.float32)) + tf.reshape(tf.math.log(x[1] / (1 - x[1])), (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([beta_coeff, beta]); # beta_reverse.shape = (batch, height, width, n_colors, trajectory_length)
+  mean = tf.keras.layers.Lambda(lambda x, t: tf.expand_dims(x[0], axis = -1) * tf.math.sqrt(1 - tf.reshape(x[1], (-1, 1, 1, 1, t))) + x[2] * tf.math.sqrt(tf.reshape(x[1], (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([inputs, beta, mu_coeff]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
+  std = tf.keras.layers.Lambda(lambda x: tf.math.sqrt(x))(beta_reverse); # std.shape = (batch, height, width, n_colors, trajectory_length)
+  return tf.keras.Model(inputs = (inputs, beta), outputs = (mean, std));
 
 class BetaForward(tf.keras.layers.Layer):
   def __init__(self, trajectory_length = 1000, n_basis = 10, step1_beta = 1e-3, **kwargs):
@@ -115,8 +121,9 @@ class BetaForward(tf.keras.layers.Layer):
 if __name__ == "__main__":
   decoder = Decoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   inputs = np.random.normal(size = (10, 64, 64, 3));
-  mu, beta = decoder(inputs);
-  print(mu.shape, beta.shape);
+  beta = np.random.normal(size = (1000,))
+  mean, std = decoder([inputs, beta]);
+  print(mean.shape, std.shape);
   decoder.save('decoder.h5');
   beta_forward = BetaForward();
   beta = beta_forward([]);
