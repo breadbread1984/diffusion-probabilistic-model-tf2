@@ -85,7 +85,7 @@ def Encoder(trajectory_length = 1000, **kwargs):
   # calculate smoothed betas
   t = tf.keras.layers.Lambda(lambda x, t: tf.range(1, t + 1, dtype = tf.float32), arguments = {'t': trajectory_length})(inputs); # t.shape = (trajectory_length,)
   diff = tf.keras.layers.Lambda(lambda x, t: tf.math.abs(tf.expand_dims(x, axis = 1) - tf.expand_dims(tf.range(t, dtype = tf.float32), axis = 0)), arguments = {'t': trajectory_length})(t); # diff.shape = (trajectory_length, trajectory_length)
-  soft_picker = tf.keras.layers.Lambda(lambda x: tf.math.maximum(1 - diff, 0.))(diff); # soft_picker.shape = (trajectory_length, trajectory_length), each row is soft picker
+  soft_picker = tf.keras.layers.Lambda(lambda x: tf.math.maximum(1 - x, 0.))(diff); # soft_picker.shape = (trajectory_length, trajectory_length), each row is soft picker
   smoothed_beta = tf.keras.layers.Lambda(lambda x: tf.transpose(tf.linalg.matmul(x[0], x[1], transpose_b = True)))([soft_picker, beta]); # smoothed_beta.shape = (batch, trajectory_length)
   # 
   #smoothed_alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta); # smoothed_alpha.shape = (batch, trajectory_length)
