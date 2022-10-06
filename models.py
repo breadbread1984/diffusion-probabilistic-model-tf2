@@ -87,7 +87,6 @@ def Encoder(trajectory_length = 1000, **kwargs):
   diff = tf.keras.layers.Lambda(lambda x, t: tf.math.abs(tf.expand_dims(x, axis = 1) - tf.expand_dims(tf.range(t, dtype = tf.float32), axis = 0)), arguments = {'t': trajectory_length})(t); # diff.shape = (trajectory_length, trajectory_length)
   soft_picker = tf.keras.layers.Lambda(lambda x: tf.math.maximum(1 - x, 0.))(diff); # soft_picker.shape = (trajectory_length, trajectory_length), each row is soft picker
   smoothed_beta = tf.keras.layers.Lambda(lambda x: tf.transpose(tf.linalg.matmul(x[0], x[1], transpose_b = True)))([soft_picker, beta]); # smoothed_beta.shape = (batch, trajectory_length)
-  # 
   #smoothed_alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta); # smoothed_alpha.shape = (batch, trajectory_length)
   alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(beta); # alpha.shape = (batch, trajectory_length)
   alpha_cumprod = tf.keras.layers.Lambda(lambda x: tf.math.cumprod(x, axis = -1))(alpha); # alpha_cumprod.shape = (batch, trajectory_length)
@@ -141,7 +140,7 @@ if __name__ == "__main__":
   encoder = Encoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   decoder = Decoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   inputs = np.random.normal(size = (10, 64, 64, 3));
-  beta = np.random.normal(size = (1000,));
+  beta = np.random.normal(size = (10, 1000,));
   sample = encoder([inputs, beta]);
   print(sample.shape);
   encoder.save('encoder.h5');
