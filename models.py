@@ -29,7 +29,7 @@ def MultiLayerConvolution(n_layers = 4, **kwargs):
     results = MultiScaleConv(**kwargs)(inputs);
   return tf.keras.Model(inputs = inputs, outputs = results);
 
-def MLPConvolution(n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, **kwargs):
+def MLPConvolution(n_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, **kwargs):
   inputs = tf.keras.Input((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors', 3))); # inputs.shape = (batch, h, w, 3)
   conv_results = MultiLayerConvolution(**kwargs)(inputs); # conv_results.shape = (batch, h, w, n_hidden)
   conv_results = tf.keras.layers.Lambda(lambda x, s: x / s, arguments = {'s': np.sqrt(kwargs.get('n_hidden'))})(conv_results); # conv_results.shape = (batch, h, w, n_hidden)
@@ -46,17 +46,17 @@ def MLPConvolution(n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_den
     if i != n_layers_dense_upper - 1:
       dense_results = tf.keras.layers.Dense(n_hidden_dense_upper, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant(), activation = tf.keras.layers.LeakyReLU())(dense_results);
     else:
-      dense_results = tf.keras.layers.Dense(kwargs.get('n_colors') * 2 * n_temporal_basis, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant())(dense_results);
-  # NOTE: dense_results.shape = (batch, height, width, n_colors * 2 * n_temporal_basis)
+      dense_results = tf.keras.layers.Dense(kwargs.get('n_colors') * 2 * n_basis, kernel_initializer = tf.keras.initializers.Orthogonal(), bias_initializer = tf.keras.initializers.Constant())(dense_results);
+  # NOTE: dense_results.shape = (batch, height, width, n_colors * 2 * n_basis)
   return tf.keras.Model(inputs = inputs, outputs = dense_results);
 
 def Decoder(trajectory_length = 1000, **kwargs):
   inputs = tf.keras.Input((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'))); # inputs.shape = (batch, height, width, n_colors)
   beta = tf.keras.Input((trajectory_length,)); # beta.shape = (batch, trajectory_length)
-  results = MLPConvolution(**kwargs)(inputs); # results.shape = (batch, height, width, n_colors * 2 * n_temporal_basis)
-  results = tf.keras.layers.Reshape((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'), 2, kwargs.get('n_temporal_basis')))(results);
+  results = MLPConvolution(**kwargs)(inputs); # results.shape = (batch, height, width, n_colors * 2 * n_basis)
+  weights = tf.keras.layers.Reshape((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'), 2, kwargs.get('n_basis')))(results); # weights.shape = (batch, height, width, n_colors, 2, n_basis)
   def generate_temporal_basis(trajectory_length, n_basis):
-    # sample n_basis soft one-hot basises
+    # create `n_basis` eigvectors of dimension `trajectory_length` which are soft one-hot vectors
     temporal_basis = tf.zeros((trajectory_length, n_basis));
     xx = tf.linspace(-1, 1, trajectory_length); # xx.shape = (trajectory_length,)
     x_centers = tf.linspace(-1, 1, n_basis); # x_centers.shape = (n_basis,)
@@ -65,10 +65,10 @@ def Decoder(trajectory_length = 1000, **kwargs):
     temporal_basis /= tf.math.reduce_sum(temporal_basis, axis = 1, keepdims = True); # temporal_basis.shape = (trajectory_length, n_basis)
     return tf.cast(tf.transpose(temporal_basis), dtype = tf.float32); # shape = (n_basis, trajectory_length)
   # conv_mlp_outputs{batch, height, width, n_colors, 2, n_basis} * temporal_basis{n_basis, trajectory_length} = results.shape{batch, height, width, n_colors, 2, trajectory_length}
-  temporal_basis = tf.keras.layers.Lambda(lambda x, t, b: generate_temporal_basis(t, b), arguments = {'t': trajectory_length, 'b': kwargs.get('n_temporal_basis')})(inputs); # temporal_basis.shape = (n_basis, trajectory_length)
-  results = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([results, temporal_basis]); # results.shape = (batch, height, width, n_colors, 2, trajectory_length)
-  mu_coeff = tf.keras.layers.Lambda(lambda x: x[...,0,:])(results); # mu.shape = (batch, height, width, n_colors, trajectory_length)
-  beta_coeff = tf.keras.layers.Lambda(lambda x: x[...,1,:])(results); # beta.shape = (batch, height, width, n_colors, trajectory_length)
+  temporal_basis = tf.keras.layers.Lambda(lambda x, t, b: generate_temporal_basis(t, b), arguments = {'t': trajectory_length, 'b': kwargs.get('n_basis')})(inputs); # temporal_basis.shape = (n_basis, trajectory_length)
+  coefficients = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([weights, temporal_basis]); # coefficients.shape = (batch, height, width, n_colors, 2, trajectory_length)
+  mu_coeff = tf.keras.layers.Lambda(lambda x: x[...,0,:])(coefficients); # mu.shape = (batch, height, width, n_colors, trajectory_length)
+  beta_coeff = tf.keras.layers.Lambda(lambda x: x[...,1,:])(coefficients); # beta.shape = (batch, height, width, n_colors, trajectory_length)
   # beta and mean for reverse(decoder) are perturbation of beta and mean for forward(encoder) process
   # beta_reverse = sigmoid(beta_coeff + log(beta / (1 - beta)))
   # mean = x * sqrt(1 - beta) + mu_coeff * sqrt(beta)
@@ -137,8 +137,8 @@ class BetaForward(tf.keras.layers.Layer):
     return cls(**config);
 
 if __name__ == "__main__":
-  encoder = Encoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
-  decoder = Decoder(shape = (64, 64), n_temporal_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
+  encoder = Encoder(shape = (64, 64), n_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
+  decoder = Decoder(shape = (64, 64), n_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   inputs = np.random.normal(size = (10, 64, 64, 3));
   beta = np.random.normal(size = (10, 1000,));
   sample = encoder([inputs, beta]);
