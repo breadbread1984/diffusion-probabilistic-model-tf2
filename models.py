@@ -56,7 +56,7 @@ def Decoder(trajectory_length = 1000, **kwargs):
   # 1) predict weights in eigenvector space
   results = MLPConvolution(**kwargs)(codes); # results.shape = (batch, height, width, n_colors * 2 * n_basis)
   weights = tf.keras.layers.Reshape((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors'), 2, kwargs.get('n_basis')))(results); # weights.shape = (batch, height, width, n_colors, 2, n_basis)
-  # 2) reconstruct vectors through weights in eigenvector space
+  # 2) reconstruct coefficients through their weights in eigenvector space
   # NOTE: coefficients = matmul(weights, temporal_basis)
   # NOTE: mu_coeff, beta_coeff = coefficients
   def generate_temporal_basis(trajectory_length, n_basis):
