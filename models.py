@@ -77,7 +77,7 @@ def Decoder(trajectory_length = 1000, **kwargs):
   # beta forward = sigmoid(log(beta_forward / (1 - beta_forward))) ====perturbation===> beta reverse = sigmoid(beta_coeff + log(beta_forward / (1 - beta_forward)))
   # mean forward = x * sqrt(1 - beta_forward) ====perturbation==> mean reverse = x * sqrt(1 - beta_forward) + mu_coeff * sqrt(beta_forward)
   # std reverse = sqrt(beta_reverse), according to the definition
-  beta_reverse = tf.keras.layers.Lambda(lambda x, t: tf.math.sigmoid(x[0] / tf.math.sqrt(tf.cast(t, dtype = tf.float32)) + tf.reshape(tf.math.log(x[1] / (1 - x[1])), (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([beta_coeff, beta_forward]); # beta_forward_reverse.shape = (batch, height, width, n_colors, trajectory_length)
+  beta_reverse = tf.keras.layers.Lambda(lambda x, t: tf.math.sigmoid(x[0] / tf.math.sqrt(tf.cast(t, dtype = tf.float32)) + tf.reshape(tf.math.log(x[1] / (1 - x[1])), (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([beta_coeff, beta_forward]); # beta_reverse.shape = (batch, height, width, n_colors, trajectory_length)
   mean_reverse = tf.keras.layers.Lambda(lambda x, t: tf.expand_dims(x[0], axis = -1) * tf.math.sqrt(1 - tf.reshape(x[1], (-1, 1, 1, 1, t))) + x[2] * tf.math.sqrt(tf.reshape(x[1], (-1, 1, 1, 1, t))), arguments = {'t': trajectory_length})([codes, beta_forward, mu_coeff]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
   std_reverse = tf.keras.layers.Lambda(lambda x: tf.math.sqrt(x))(beta_reverse); # std.shape = (batch, height, width, n_colors, trajectory_length)
   samples = tfp.layers.DistributionLambda(lambda x: tfp.distributions.Independent(tfp.distributions.Normal(loc = x[0], scale = x[1])))([mean_reverse, std_reverse]);
