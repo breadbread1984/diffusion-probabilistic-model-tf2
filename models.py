@@ -70,7 +70,15 @@ def Decoder(trajectory_length = 1000, **kwargs):
     return tf.cast(tf.transpose(temporal_basis), dtype = tf.float32); # shape = (n_basis, trajectory_length)
   # conv_mlp_outputs{batch, height, width, n_colors, 2, n_basis} * temporal_basis{n_basis, trajectory_length} = results.shape{batch, height, width, n_colors, 2, trajectory_length}
   temporal_basis = tf.keras.layers.Lambda(lambda x, t, b: generate_temporal_basis(t, b), arguments = {'t': trajectory_length, 'b': kwargs.get('n_basis')})(codes); # temporal_basis.shape = (n_basis, trajectory_length)
-  coefficients = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([weights, temporal_basis]); # coefficients.shape = (batch, height, width, n_colors, 2, trajectory_length)
+  def generate_soft_picker(trajectory_length):
+    # generate soft pickers as row vectors of the return matrix
+    t = tf.range(1, trajectory_length + 1, dtype = tf.flaot32); # t.shape = (trajectory_length,)
+    diff = tf.math.abs(tf.expand_dims(t, axis = 1) - tf.expand_dims(tf.range(trajectory_length, dtype = tf.float32), axis = 0)); # diff.shape = (trajectory_length, trajector_length)
+    soft_picker = tf.math.maximum(1 - diff, 0.); # soft_picker.shape = (trajectory_length, trajectory_length) = picker number x picker dim
+    return soft_picker;
+  soft_picker = tf.keras.layers.Lambda(lambda x, t: generate_soft_picker(t), arguments = {'t': trajectory_length})(codes); # soft_picker.shape = (picker num, picker dim)
+  soft_temporal_basis = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([temporal_basis, soft_picker]); # soft_temporal_basis.shape = (n_basis, picker num = trajectory_length)
+  coefficients = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1]))([weights, soft_temporal_basis]); # coefficients.shape = (batch, height, width, n_colors, 2, trajectory_length)
   mu_coeff = tf.keras.layers.Lambda(lambda x: x[...,0,:])(coefficients); # mu.shape = (batch, height, width, n_colors, trajectory_length)
   beta_coeff = tf.keras.layers.Lambda(lambda x: x[...,1,:])(coefficients); # beta.shape = (batch, height, width, n_colors, trajectory_length)
   # 3) beta reverse is a perturbation (through coefficient of beta_coeff) of beta forward, mean reverse is a perturbation (through coefficient of mu_coeff) of mu forward
@@ -86,10 +94,14 @@ def Decoder(trajectory_length = 1000, **kwargs):
 def Encoder(trajectory_length = 1000, **kwargs):
   inputs = tf.keras.Input((kwargs.get('shape')[0], kwargs.get('shape')[1], kwargs.get('n_colors', 3))); # inputs.shape = (batch, height, width, n_colors)
   beta_forward = tf.keras.Input((trajectory_length,)); # beta_forward.shape = (batch, trajectory_length)
-  # calculate smoothed betas
-  t = tf.keras.layers.Lambda(lambda x, t: tf.range(1, t + 1, dtype = tf.float32), arguments = {'t': trajectory_length})(inputs); # t.shape = (trajectory_length,)
-  diff = tf.keras.layers.Lambda(lambda x, t: tf.math.abs(tf.expand_dims(x, axis = 1) - tf.expand_dims(tf.range(t, dtype = tf.float32), axis = 0)), arguments = {'t': trajectory_length})(t); # diff.shape = (trajectory_length, trajectory_length)
-  soft_picker = tf.keras.layers.Lambda(lambda x: tf.math.maximum(1 - x, 0.))(diff); # soft_picker.shape = (trajectory_length, trajectory_length), each row is soft picker
+  def generate_soft_picker(trajectory_length):
+    # generate soft pickers as row vectors of the return matrix
+    t = tf.range(1, trajectory_length + 1, dtype = tf.flaot32); # t.shape = (trajectory_length,)
+    diff = tf.math.abs(tf.expand_dims(t, axis = 1) - tf.expand_dims(tf.range(trajectory_length, dtype = tf.float32), axis = 0)); # diff.shape = (trajectory_length, trajector_length)
+    soft_picker = tf.math.maximum(1 - diff, 0.); # soft_picker.shape = (trajectory_length, trajectory_length) = picker number x picker dim
+    return soft_picker;
+  # 1) calculate smoothed betas
+  soft_picker = tf.keras.layers.Lambda(lambda x, t: generate_soft_picker(t), arguments = {'t': trajectory_length})(inputs);
   smoothed_beta = tf.keras.layers.Lambda(lambda x: tf.transpose(tf.linalg.matmul(x[0], x[1], transpose_b = True)))([soft_picker, beta_forward]); # smoothed_beta.shape = (batch, trajectory_length)
   #smoothed_alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta); # smoothed_alpha.shape = (batch, trajectory_length)
   alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(beta_forward); # alpha.shape = (batch, trajectory_length)
