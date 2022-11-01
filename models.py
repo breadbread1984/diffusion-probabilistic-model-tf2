@@ -100,19 +100,36 @@ def Encoder(trajectory_length = 1000, **kwargs):
     diff = tf.math.abs(tf.expand_dims(t, axis = 1) - tf.expand_dims(tf.range(trajectory_length, dtype = tf.float32), axis = 0)); # diff.shape = (trajectory_length, trajector_length)
     soft_picker = tf.math.maximum(1 - diff, 0.); # soft_picker.shape = (trajectory_length, trajectory_length) = picker number x picker dim
     return soft_picker;
-  # 1) calculate mean and std
-  # NOTE: mean = x_0 * prod from {i=1} to {T} sqrt(alpha_i), in which alpha_i = 1 - beta_i
-  # NOTE: std = sqrt(1 - prod from {i=1} to {T} sqrt(alpha_i)), in which alpha_i = 1 - beta_i
+  # 0) alpha_i = 1 - beta_i, calculate alpha_forward_cumprod = prod from {i=1} to {T} {alpha_i}
+  # smooth alpha_forward_cumprod with softpicker
   soft_picker = tf.keras.layers.Lambda(lambda x, t: generate_soft_picker(t), arguments = {'t': trajectory_length})(inputs); # soft picker.shape = (picker num, picker dim)
-  smoothed_beta_forward = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([beta_forward, soft_picker]); # smoothed_beta_forward.shape = (batch, trajectory_length)
-  #smoothed_alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta); # smoothed_alpha.shape = (batch, trajectory_length)
+
   alpha_forward = tf.keras.layers.Lambda(lambda x: 1 - x)(beta_forward); # alpha.shape = (batch, trajectory_length)
   alpha_forward_cumprod = tf.keras.layers.Lambda(lambda x: tf.math.cumprod(x, axis = -1))(alpha_forward); # alpha_cumprod.shape = (batch, trajectory_length)
   smoothed_alpha_forward_cumprod = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([alpha_forward_cumprod, soft_picker]); # smoothed_alpha_cumprod.shape = (batch, trajectory_length)
-  mean = tf.keras.layers.Lambda(lambda x: tf.expand_dims(x[0], axis = -1) * tf.math.sqrt(tf.reshape(x[1], (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1]))))([inputs, smoothed_alpha_forward_cumprod]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
-  std = tf.keras.layers.Lambda(lambda x: tf.tile(tf.reshape(tf.math.sqrt(1 - x[1]), (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1])), (1, tf.shape(x[0])[1], tf.shape(x[0])[2], tf.shape(x[0])[3], 1)))([inputs, smoothed_alpha_forward_cumprod]); # std.shape = (batch, height, width, n_colors, trajectory_length)
-  samples = tfp.layers.DistributionLambda(lambda x: tfp.distributions.Independent(tfp.distributions.Normal(loc = x[0], scale = x[1])))([mean, std]); # sample.shape = (batch, height, width, n_colors, trajectory_length)
-  return tf.keras.Model(inputs = (inputs, beta_forward), outputs = samples);
+  # 1) sample x_uniformnoisy ~ U(input - 0.5, input + 0.5)
+  x_uniformnoisy = tfp.layers.DistributionLambda(lambda x: tfp.distributions.Independent(tfp.distributions.Uniform(low = -0.5 + x, high = 0.5 + x)))(inputs); # uniformnoisy.shape = (batch, height, width, n_colors)
+  x_uniformnoisy = tf.keras.layers.Lambda(lambda x, t: tf.tile(tf.expand_dims(x, axis = -1), (1,1,1,1,t)), arguments = {'t': trajectory_length})(x_uniformnoisy); # x_uniformnoise.shape = (batch, height, width, n_colors, trajectory_length)
+  # 2) sample x_noisy ~ N(mean = x_uniformnoisy * sqrt(prod from {i=1} to {T} (1 - beta_i)), std = sqrt(1 - prod from {i=1} to {T} (1 - beta_i)))
+  mean = tf.keras.layers.Lambda(lambda x: x[0] * tf.math.sqrt(tf.reshape(x[1], (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1]))))([x_uniformnoisy, smoothed_alpha_forward_cumprod]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
+  std = tf.keras.layers.Lambda(lambda x: tf.math.sqrt(1 - tf.reshape(x, (tf.shape(x)[0],1,1,1,tf.shape(x)[-1]))))(smoothed_alpha_forward_cumprod); # std.shape = (batch, 1, 1, 1, trajectory_length)
+  x_noisy = tfp.layers.DistributionLambda(lambda x: tfp.distributions.Independent(tfp.distributions.Normal(loc = x[0], scale = x[1])))([mean, std]); # x_noisy.shape = (batch, height, width, n_colors, trajectory_length)
+
+  # 3) mu1_sc1 = sqrt(prod from {i=1} to {t-1} (1 - beta_i))   t in [1,..,,T]
+  #    mu2_sc1 = 1 / sqrt(1 - beta_t)  t in [1,...,T]
+  #    cov1 = 1 - prod from {i = 1} to {t-1} (1 - beta_i)   t in [1,...,T]
+  #    cov2 = beta_i / (1 - beta_i)
+  smoothed_beta_forward = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([beta_forward, soft_picker]); # smoothed_beta_forward.shape = (batch, trajectory_length)
+  smoothed_alpha_forward = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta_forward); # smoothed_alpha.shape = (batch, trajectory_length)
+
+  mu1_sc1 = tf.keras.layers.Lambda(lambda x: tf.math.sqrt(x[0] / x[1]))([smoothed_alpha_forward_cumprod, smoothed_alpha_forward]); # mu1_sc1.shape = (batch, trajectory_length)
+  mu2_sc1 = tf.keras.layers.Lambda(lambda x: 1 / tf.math.sqrt(x))(smoothed_alpha_forward); # mu2_sc1.shape = (batch, trajectory_length)
+  cov1 = tf.keras.layers.Lambda(lambda x: 1 - x[0] / x[1])([smoothed_alpha_forward_cumprod, smoothed_alpha_forward]); # cov1.shape = (batch, trajectory_length)
+  cov2 = tf.keras.layers.Lambda(lambda x: x[0] / x[1])([smoothed_beta_forward, smoothed_alpha_forward]); # cov2.shape = (batch, trajectory_length)
+  lam = tf.keras.layers.Lambda(lambda x: 1/x[0] + 1/x[1])([cov1, cov2]); # lam.shape = (batch, trajectory_length)
+  mu = tf.keras.layers.Lambda(lambda x: (x[0] * tf.reshape(x[2] / x[4], (tf.shape(x[2])[0],1,1,1,tf.shape(x[2])[-1])) + x[1] * tf.reshape(x[3] / x[5], (tf.shape(x[3])[0],1,1,1,tf.shape(x[3])[-1]))) / tf.reshape(x[6], (tf.shape(x[6])[0],1,1,1,tf.shape(x[6])[-1])))([x_uniformnoisy, x_noisy, mu1_sc1, mu2_sc1, cov1, cov2, lam]); # mu.shape = (batch, height, width, n_colors, trajectory_length)
+  sigma = tf.keras.layers.Lambda(lambda x: tf.math.sqrt(1 / tf.reshape(x, (tf.shape(x)[0],1,1,1,tf.shape(x)[-1]))))(lam); # sigma,shape = (batch, 1, 1, 1, trajectory_length)
+  return tf.keras.Model(inputs = (inputs, beta_forward), outputs = (x_noisy, mu, sigma));
 
 class BetaForward(tf.keras.layers.Layer):
   def __init__(self, trajectory_length = 1000, n_basis = 10, step1_beta = 1e-3, **kwargs):
@@ -159,7 +176,7 @@ if __name__ == "__main__":
   decoder = Decoder(shape = (64, 64), n_basis = 10, n_layers_dense_lower = 4, n_hidden_dense_lower = 500, n_hidden_dense_lower_output = 2, n_layers_dense_upper = 2, n_hidden_dense_upper = 20, n_layers = 4, n_colors = 3, n_hidden = 20, n_scales = 1);
   inputs = np.random.normal(size = (10, 64, 64, 3));
   beta = np.random.normal(size = (10, 1000,));
-  sample = encoder([inputs, beta]);
+  sample, mu, sigma = encoder([inputs, beta]);
   print(sample.shape);
   encoder.save('encoder.h5');
   sample = decoder([inputs, beta]);
