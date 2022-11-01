@@ -100,15 +100,17 @@ def Encoder(trajectory_length = 1000, **kwargs):
     diff = tf.math.abs(tf.expand_dims(t, axis = 1) - tf.expand_dims(tf.range(trajectory_length, dtype = tf.float32), axis = 0)); # diff.shape = (trajectory_length, trajector_length)
     soft_picker = tf.math.maximum(1 - diff, 0.); # soft_picker.shape = (trajectory_length, trajectory_length) = picker number x picker dim
     return soft_picker;
-  # 1) calculate smoothed betas
+  # 1) calculate mean and std
+  # NOTE: mean = x_0 * prod from {i=1} to {T} sqrt(alpha_i), in which alpha_i = 1 - beta_i
+  # NOTE: std = sqrt(1 - prod from {i=1} to {T} sqrt(alpha_i)), in which alpha_i = 1 - beta_i
   soft_picker = tf.keras.layers.Lambda(lambda x, t: generate_soft_picker(t), arguments = {'t': trajectory_length})(inputs); # soft picker.shape = (picker num, picker dim)
-  smoothed_beta = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([beta_forward, soft_picker]); # smoothed_beta.shape = (batch, trajectory_length)
+  smoothed_beta_forward = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([beta_forward, soft_picker]); # smoothed_beta_forward.shape = (batch, trajectory_length)
   #smoothed_alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(smoothed_beta); # smoothed_alpha.shape = (batch, trajectory_length)
-  alpha = tf.keras.layers.Lambda(lambda x: 1 - x)(beta_forward); # alpha.shape = (batch, trajectory_length)
-  alpha_cumprod = tf.keras.layers.Lambda(lambda x: tf.math.cumprod(x, axis = -1))(alpha); # alpha_cumprod.shape = (batch, trajectory_length)
-  smoothed_alpha_cumprod = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([alpha_cumprod, soft_picker]); # smoothed_alpha_cumprod.shape = (batch, trajectory_length)
-  mean = tf.keras.layers.Lambda(lambda x: tf.expand_dims(x[0], axis = -1) * tf.math.sqrt(tf.reshape(x[1], (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1]))))([inputs, smoothed_alpha_cumprod]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
-  std = tf.keras.layers.Lambda(lambda x: tf.tile(tf.reshape(tf.math.sqrt(1 - x[1]), (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1])), (1, tf.shape(x[0])[1], tf.shape(x[0])[2], tf.shape(x[0])[3], 1)))([inputs, smoothed_alpha_cumprod]); # std.shape = (batch, height, width, n_colors, trajectory_length)
+  alpha_forward = tf.keras.layers.Lambda(lambda x: 1 - x)(beta_forward); # alpha.shape = (batch, trajectory_length)
+  alpha_forward_cumprod = tf.keras.layers.Lambda(lambda x: tf.math.cumprod(x, axis = -1))(alpha_forward); # alpha_cumprod.shape = (batch, trajectory_length)
+  smoothed_alpha_forward_cumprod = tf.keras.layers.Lambda(lambda x: tf.linalg.matmul(x[0], x[1], transpose_b = True))([alpha_forward_cumprod, soft_picker]); # smoothed_alpha_cumprod.shape = (batch, trajectory_length)
+  mean = tf.keras.layers.Lambda(lambda x: tf.expand_dims(x[0], axis = -1) * tf.math.sqrt(tf.reshape(x[1], (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1]))))([inputs, smoothed_alpha_forward_cumprod]); # mean.shape = (batch, height, width, n_colors, trajectory_length)
+  std = tf.keras.layers.Lambda(lambda x: tf.tile(tf.reshape(tf.math.sqrt(1 - x[1]), (tf.shape(x[1])[0], 1, 1, 1, tf.shape(x[1])[-1])), (1, tf.shape(x[0])[1], tf.shape(x[0])[2], tf.shape(x[0])[3], 1)))([inputs, smoothed_alpha_forward_cumprod]); # std.shape = (batch, height, width, n_colors, trajectory_length)
   samples = tfp.layers.DistributionLambda(lambda x: tfp.distributions.Independent(tfp.distributions.Normal(loc = x[0], scale = x[1])))([mean, std]); # sample.shape = (batch, height, width, n_colors, trajectory_length)
   return tf.keras.Model(inputs = (inputs, beta_forward), outputs = samples);
 
